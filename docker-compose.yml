@@ -13,6 +13,11 @@ services:
       MYSQL_DATABASE: ${DB_NAME}
     volumes:
       - product_db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   # Microservicio de Productos en Python
   product-service:
@@ -31,7 +36,8 @@ services:
       - DB_NAME=${DB_NAME}
       - DB_PASSWORD=${DB_PASSWORD}
     depends_on:
-      - product-mysql
+      product-mysql:
+          condition: service_healthy
 
 volumes:
   product_db_data:
