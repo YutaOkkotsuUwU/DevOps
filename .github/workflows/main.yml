@@ -1,0 +1,73 @@
+name: Deploy to AWS ECS
+
+# Se dispara automáticamente cuando haces un 'push' a la rama main
+on:
+  push:
+    branches: ["main"]
+
+env:
+  AWS_REGION: us-east-1 # Tu región de AWS
+  ECR_REPOSITORY: ms-product # El nombre de tu repositorio en ECR
+  ECS_CLUSTER: ms-product-docker # El nombre de tu clúster ECS
+  ECS_SERVICE: ms-product-service # El nombre de tu servicio ECS
+  CONTAINER_NAME: eval3_product_backend # El nombre del contenedor dentro de tu Task Definition
+  ECS_TASK_DEFINITION_NAME: ms-product-task # El nombre de tu Task Definition en ECS
+
+jobs:
+  deploy:
+    name: Build, Push and Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      # 1. Autenticarse en AWS usando tus secretos cifrados
+      - name: Configurar credenciales de AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # 2. Loguearse en el registro de contenedores ECR
+      - name: Iniciar sesión en Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # 3. Compilar la imagen de Docker usando el hash del commit como TAG único y subirla
+      - name: Compilar y subir imagen a Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # 4. Descargar la Definición de Tarea (Task Definition) actual que está corriendo en ECS
+      - name: Descargar Task Definition de ECS
+        run: |
+          aws ecs describe-task-definition --task-definition ${{ env.ECS_TASK_DEFINITION_NAME }} --query taskDefinition > task-definition.json
+
+      # 5. Modificar el JSON del Task Definition reemplazando la imagen vieja por la nueva URI recién compilada
+      - name: Actualizar ID de Imagen en el Task Definition de ECS
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.build-image.outputs.image }}
+
+      # 6. Desplegar el nuevo Task Definition en ECS (Inicia el Rolling Update de AWS)
+      - name: Desplegar en Amazon ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true # Espera a que el contenedor pase el healthcheck de AWS para marcar el pipeline como exitoso
